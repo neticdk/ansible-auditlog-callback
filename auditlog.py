@@ -82,7 +82,7 @@ class CallbackModule(object):
             })
 
     def runner_on_ok(self, host, res):
-        changed = 'changed' if res.pop('changed', False) else 'ok'
+        changed = 'changed' if res.get('changed', False) else 'ok'
         module_name = res['invocation'].get('module_name', '') if 'invocation' in res else ''
         self.logger.log('runner_on_ok', {
             'inventory_host': host,
@@ -123,6 +123,9 @@ class CallbackModule(object):
             'inventory_host': host,
             'module_name': module_name,
             })
+
+    def runner_on_file_diff(self, host, diff):
+        pass
 
     def playbook_on_start(self):
         p = Popen(['logname'], stdout=PIPE)
@@ -166,7 +169,6 @@ class CallbackModule(object):
     def playbook_on_vars_prompt(
             self, varname, private=True, prompt=None, encrypt=None,
             confirm=False, salt_size=None, salt=None, default=None):
-        pass
 
     def playbook_on_setup(self):
         pass
