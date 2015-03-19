@@ -6,7 +6,21 @@ import datetime
 import socket
 import json
 import uuid
+import re
 from ansible import utils
+
+def get_dotted_val_in_dict(d, keys):
+    if "." in keys:
+        key, rest = keys.split(".", 1)
+        if type(d.get(key, {})) == type({}):
+            return get_dotted_val_in_dict(d.get(key, {}), rest)
+        else:
+            nxt = rest.split(".", 1)
+            if type(d.get(key, {})) == type({}) and d.get(key, {}).get(nxt[0], None):
+                return d.get(key)
+    else:
+        if d.get(keys):
+            return d[keys]
 
 class AnsibleAuditlogLogger(object):
     """
@@ -62,6 +76,17 @@ class CallbackModule(object):
             self.disabled = True
         else:
             self.disabled = False
+
+        # Example: version,my.nested.var
+        audit_vars = os.getenv('ANSIBLE_AUDITLOG_AUDIT_VARS', None)
+        if audit_vars:
+            # Only allow alphanumeric + _ + .
+            pattern = re.compile('[^\w.,]+', re.UNICODE)
+            self.audit_vars = pattern.sub('', audit_vars).split(',')
+            # convert to dict
+            self.audit_vars = dict((el,0) for el in self.audit_vars)
+        else:
+            self.audit_vars = {}
 
         try:
             self.logger = AnsibleAuditlogLogger()
@@ -128,6 +153,15 @@ class CallbackModule(object):
         pass
 
     def playbook_on_start(self):
+        self.my_vars = self.playbook.global_vars
+        self.my_vars = utils.combine_vars(
+                self.my_vars, self.playbook.extra_vars)
+
+        # This gets us the user that originally spawed the ansible process.
+        # Watch out. If you (yes, you) started some process that starts ansible
+        # (eg. jenkins), then you (yes, you) will be the one listed as the user
+        # running ansible, even though you started jenkins with sudo service
+        # jenkins start.
         p = Popen(['logname'], stdout=PIPE)
         logname = p.stdout.readline().rstrip('\n')
         p.terminate()
@@ -188,6 +222,17 @@ class CallbackModule(object):
         if len(hosts_in_play) == 0:
             return
 
+        hosts = self.play.playbook.inventory.get_hosts()
+
+        # Combine inventory vars, global vars and extra vars
+        self.my_vars = utils.combine_vars(
+                self.my_vars, self.play.vars)
+
+        for myvar in self.audit_vars:
+            val = get_dotted_val_in_dict(self.my_vars, myvar)
+            self.audit_vars[myvar] = val
+
+
         self.logger.log('playbook_on_play_start', {
             'name': self.play.name,
             'remote_user': self.play.remote_user,
@@ -201,9 +246,22 @@ class CallbackModule(object):
             })
 
     def playbook_on_stats(self, stats):
-        log_entry= {'stats': {}}
+        stats_keys = ['processed', 'failures', 'ok', 'dark', 'changed', 'skipped']
+        summary_stats_keys = ['failures', 'ok', 'unreachable', 'changed', 'skipped']
+        log_entry= { 'stats': {'summary': {}, 'details': {}} }
 
-        for stat in ['processed', 'failures', 'ok', 'dark', 'changed', 'skipped']:
-            log_entry['stats'][stat] = getattr(stats, stat)
+        for key in stats_keys:
+            log_entry['stats']['details'][key] = {}
+            log_entry['stats']['details'][key] = getattr(stats, key)
+        for key in summary_stats_keys:
+            log_entry['stats']['summary'][key] = 0
+
+        hosts = sorted(stats.processed.keys())
+        for h in hosts:
+            s = stats.summarize(h)
+            for key in summary_stats_keys:
+                log_entry['stats']['summary'][key] += s[key]
+
+        log_entry['audit_vars'] = self.audit_vars
 
         self.logger.log('playbook_on_stats', log_entry)
