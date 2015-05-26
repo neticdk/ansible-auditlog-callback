@@ -9,6 +9,7 @@ import uuid
 import re
 from ansible import utils
 
+
 def get_dotted_val_in_dict(d, keys):
     if "." in keys:
         key, rest = keys.split(".", 1)
@@ -21,6 +22,7 @@ def get_dotted_val_in_dict(d, keys):
     else:
         if d.get(keys):
             return d[keys]
+
 
 class AnsibleAuditlogLogger(object):
     """
@@ -35,17 +37,17 @@ class AnsibleAuditlogLogger(object):
         try:
             if not self.isWritable(logdir):
                 raise Exception("Access denied to {}".format(logdir))
-        except Exception as e:
+        except Exception:
             raise
 
         self.logfile = os.path.join(self.logdir, "{}.log".format(self.uuid))
 
     def isWritable(self, path):
         try:
-            testfile = tempfile.TemporaryFile(dir = path)
+            testfile = tempfile.TemporaryFile(dir=path)
             testfile.close()
         except OSError as e:
-            if e.errno == errno.EACCES: # 13
+            if e.errno == errno.EACCES:  # 13
                 return False
             e.filename = path
             raise
@@ -64,14 +66,14 @@ class AnsibleAuditlogLogger(object):
         fd.close()
 
 
-
 class CallbackModule(object):
     """
     writes log entries about runs
     """
 
     def __init__(self):
-        if str(os.getenv('ANSIBLE_AUDITLOG_DISABLED', 0)).lower() in ['true', '1', 'y', 'yes']:
+        auditlog_disabled = str(os.getenv('ANSIBLE_AUDITLOG_DISABLED', 0))
+        if auditlog_disabled.lower() in ['true', '1', 'y', 'yes']:
             utils.warning('Auditlog has been disabled!')
             self.disabled = True
         else:
@@ -84,7 +86,7 @@ class CallbackModule(object):
             pattern = re.compile('[^\w.,]+', re.UNICODE)
             self.audit_vars = pattern.sub('', audit_vars).split(',')
             # convert to dict
-            self.audit_vars = dict((el,0) for el in self.audit_vars)
+            self.audit_vars = dict((el, 0) for el in self.audit_vars)
         else:
             self.audit_vars = {}
 
@@ -92,7 +94,8 @@ class CallbackModule(object):
             self.logger = AnsibleAuditlogLogger()
         except Exception as e:
             self.disabled = True
-            utils.warning('Unable to initialize logging. Auditlog disabled. Error: {}'.format(str(e)))
+            utils.warning('Unable to initialize logging. \
+                          Auditlog disabled. Error: {}'.format(str(e)))
 
     def on_any(self, *args, **kwargs):
         pass
@@ -155,7 +158,7 @@ class CallbackModule(object):
     def playbook_on_start(self):
         self.my_vars = self.playbook.global_vars
         self.my_vars = utils.combine_vars(
-                self.my_vars, self.playbook.extra_vars)
+            self.my_vars, self.playbook.extra_vars)
 
         # This gets us the user that originally spawed the ansible process.
         # Watch out. If you (yes, you) started some process that starts ansible
@@ -175,10 +178,13 @@ class CallbackModule(object):
             'check_mode': self.playbook.check,
             'automation_on_behalf_of': self.playbook.extra_vars.get('automation_on_behalf_of', ''),
             'remote_user': self.playbook.remote_user,
-            'su': self.playbook.su,
-            'su_user': self.playbook.su_user,
-            'sudo': self.playbook.sudo,
-            'sudo_user': self.playbook.sudo_user,
+            'su': getattr(self.playbook, 'su', None),
+            'su_user': getattr(self.playbook, 'su_user', None),
+            'sudo': getattr(self.playbook, 'sudo', None),
+            'sudo_user': getattr(self.playbook, 'sudo_user', None),
+            'become': getattr(self.playbook, 'become', None),
+            'become_method': getattr(self.playbook, 'become_method', None),
+            'become_user': getattr(self.playbook, 'become_user', None),
             'USER': os.getenv('USER'),
             'SUDO_USER': os.getenv('SUDO_USER'),
             'logname': logname,
@@ -225,21 +231,22 @@ class CallbackModule(object):
         hosts = self.play.playbook.inventory.get_hosts()
 
         # Combine inventory vars, global vars and extra vars
-        self.my_vars = utils.combine_vars(
-                self.my_vars, self.play.vars)
+        self.my_vars = utils.combine_vars(self.my_vars, self.play.vars)
 
         for myvar in self.audit_vars:
             val = get_dotted_val_in_dict(self.my_vars, myvar)
             self.audit_vars[myvar] = val
 
-
         self.logger.log('playbook_on_play_start', {
             'name': self.play.name,
             'remote_user': self.play.remote_user,
-            'sudo': self.play.sudo,
-            'sudo_user': self.play.sudo_user,
-            'su': self.play.su,
-            'su_user': self.play.su_user,
+            'su': getattr(self.play, 'su', None),
+            'su_user': getattr(self.play, 'su_user', None),
+            'sudo': getattr(self.play, 'sudo', None),
+            'sudo_user': getattr(self.play, 'sudo_user', None),
+            'become': getattr(self.play, 'become', None),
+            'become_method': getattr(self.play, 'become_method', None),
+            'become_user': getattr(self.play, 'become_user', None),
             'serial': self.play.serial,
             'max_fail_percentage': self.play.max_fail_pct,
             'hosts': self.play.hosts,
@@ -248,7 +255,7 @@ class CallbackModule(object):
     def playbook_on_stats(self, stats):
         stats_keys = ['processed', 'failures', 'ok', 'dark', 'changed', 'skipped']
         summary_stats_keys = ['failures', 'ok', 'unreachable', 'changed', 'skipped']
-        log_entry= { 'stats': {'summary': {}, 'details': {}} }
+        log_entry = {'stats': {'summary': {}, 'details': {}}}
 
         for key in stats_keys:
             log_entry['stats']['details'][key] = {}
