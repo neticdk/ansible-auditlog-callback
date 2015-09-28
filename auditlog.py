@@ -1,38 +1,57 @@
 import os
 import tempfile
 import errno
-from subprocess import *
 import datetime
 import socket
 import json
 import uuid
 import re
+
+from subprocess import Popen, PIPE
 from ansible import utils
 
 
 def get_dotted_val_in_dict(d, keys):
+    """Searches dict d for element in keys.
+
+    Args:
+        d (dict): Dictionary to search
+        keys (str): String containing element to search for
+
+    Returns:
+        Value found at the specified element if found, else None
+
+    Examples:
+
+        Search for the value of foo['bar'] in {'foo': {'bar': 1}}
+        >>> get_dotted_val_in_dict({'foo': {'bar': 1}}, 'foo.bar')
+        1
+
+        Search for the value of foo['baz'] in {'foo': {'bar': 1}}
+        >>> get_dotted_val_in_dict({'foo': {'bar': 1}}, 'foo.baz')
+    """
+
     if "." in keys:
         key, rest = keys.split(".", 1)
-        if type(d.get(key, {})) == type({}):
-            return get_dotted_val_in_dict(d.get(key, {}), rest)
-        else:
-            nxt = rest.split(".", 1)
-            if type(d.get(key, {})) == type({}) and d.get(key, {}).get(nxt[0], None):
-                return d.get(key)
+        dval = d.get(key, {})
+        if isinstance(dval, dict):
+            return get_dotted_val_in_dict(dval, rest)
     else:
         if d.get(keys):
             return d[keys]
 
 
+def truthy_string(s):
+    """Determines if a string has a truthy value"""
+    return str(s).lower() in ['true', '1', 'y', 'yes']
+
+
 class AnsibleAuditlogLogger(object):
-    """
-    writes the log entries
-    """
+    """Writes log entries to a file"""
 
     def __init__(self, logdir='/var/log/ansible'):
         self.uuid = str(uuid.uuid4())
         self.hostname = socket.gethostname()
-        self.logdir = logdir
 
         try:
             if not self.isWritable(logdir):
@@ -40,7 +59,7 @@ class AnsibleAuditlogLogger(object):
         except Exception:
             raise
 
-        self.logfile = os.path.join(self.logdir, "{}.log".format(self.uuid))
+        self.logfile = os.path.join(logdir, "{}.log".format(self.uuid))
 
     def isWritable(self, path):
         try:
@@ -53,34 +72,33 @@ class AnsibleAuditlogLogger(object):
             raise
         return True
 
-    def log(self, event, log_entry={}):
-        log_entry['event'] = event
+    def log(self, event_id, log_entry={}):
+        log_entry['event'] = event_id
         log_entry['timestamp'] = datetime.datetime.now().isoformat()
         log_entry['controlhost'] = self.hostname
         log_entry['uuid'] = self.uuid
 
         data = json.dumps(log_entry, sort_keys=True)
 
-        fd = open(self.logfile, 'a')
-        fd.write(data+'\n')
-        fd.close()
+        with open(self.logfile, 'a') as f:
+            f.write(data+'\n')
 
 
 class CallbackModule(object):
-    """
-    writes log entries about runs
-    """
+    """Logs information from ansible"""
 
     def __init__(self):
-        auditlog_disabled = str(os.getenv('ANSIBLE_AUDITLOG_DISABLED', 0))
-        if auditlog_disabled.lower() in ['true', '1', 'y', 'yes']:
+        self.disabled = truthy_string(os.getenv('ANSIBLE_AUDITLOG_DISABLED', 0))
+        self.log_logname = truthy_string(
+            os.getenv('ANSIBLE_AUDITLOG_LOGNAME_ENABLED', 1))
+        logdir = os.getenv('ANSIBLE_AUDITLOG_LOGDIR', '/var/log/ansible')
+        audit_vars = os.getenv('ANSIBLE_AUDITLOG_AUDIT_VARS', None)
+
+        if self.disabled:
             utils.warning('Auditlog has been disabled!')
-            self.disabled = True
-        else:
-            self.disabled = False
+            return None
 
         # Example: version,my.nested.var
-        audit_vars = os.getenv('ANSIBLE_AUDITLOG_AUDIT_VARS', None)
         if audit_vars:
             # Only allow alphanumeric + _ + .
             pattern = re.compile('[^\w.,]+', re.UNICODE)
@@ -91,27 +109,27 @@ class CallbackModule(object):
             self.audit_vars = {}
 
         try:
-            self.logger = AnsibleAuditlogLogger()
+            self.logger = AnsibleAuditlogLogger(logdir=logdir)
         except Exception as e:
             self.disabled = True
-            utils.warning('Unable to initialize logging. \
-                          Auditlog disabled. Error: {}'.format(str(e)))
+            utils.warning('Unable to initialize audit logging: '
+                          '{}'.format(str(e)))
 
     def on_any(self, *args, **kwargs):
         pass
 
     def runner_on_failed(self, host, res, ignore_errors=False):
-        module_name = res['invocation'].get('module_name', '') if 'invocation' in res else ''
+        module_name = res.get('invocation', {}).get('module_name', '')
         self.logger.log('runner_on_failed', {
             'inventory_host': host,
             'module_name': module_name,
             'ignore_errors': ignore_errors,
-            'msg': res.get('msg', ''),
-            })
+            'msg': res.get('msg', '')
+        })
 
     def runner_on_ok(self, host, res):
         changed = 'changed' if res.get('changed', False) else 'ok'
-        module_name = res['invocation'].get('module_name', '') if 'invocation' in res else ''
+        module_name = res.get('invocation', {}).get('module_name', '')
         self.logger.log('runner_on_ok', {
             'inventory_host': host,
             'status': changed,
@@ -139,14 +157,14 @@ class CallbackModule(object):
         pass
 
     def runner_on_async_ok(self, host, res, jid):
-        module_name = res['invocation'].get('module_name', '') if 'invocation' in res else ''
+        module_name = res.get('invocation', {}).get('module_name', '')
         self.logger.log('runner_on_async_ok', {
             'inventory_host': host,
             'module_name': module_name,
             })
 
     def runner_on_async_failed(self, host, res, jid):
-        module_name = res['invocation'].get('module_name', '') if 'invocation' in res else ''
+        module_name = res.get('invocation', {}).get('module_name', '')
         self.logger.log('runner_on_async_failed', {
             'inventory_host': host,
             'module_name': module_name,
@@ -156,18 +174,22 @@ class CallbackModule(object):
         pass
 
     def playbook_on_start(self):
+        # These are not used until `playbook_on_play_start`
         self.my_vars = self.playbook.global_vars
         self.my_vars = utils.combine_vars(
             self.my_vars, self.playbook.extra_vars)
 
         # This gets us the user that originally spawed the ansible process.
-        # Watch out. If you (yes, you) started some process that starts ansible
-        # (eg. jenkins), then you (yes, you) will be the one listed as the user
-        # running ansible, even though you started jenkins with sudo service
-        # jenkins start.
-        p = Popen(['logname'], stdout=PIPE)
-        logname = p.stdout.readline().rstrip('\n')
-        p.terminate()
+        # Watch out: On Linux, if you (yes, you) started some process that
+        # starts ansible (i.e. jenkins), then you (yes, you) will be the one
+        # listed as the user running ansible, even though you started jenkins
+        # indirectly (e.g. using "sudo service jenkins start").
+        if self.log_logname:
+            p = Popen(['logname'], stdout=PIPE)
+            logname = p.stdout.readline().rstrip('\n')
+            p.terminate()
+        else:
+            logname = None
 
         log_entry = {
             'playbook': self.playbook.filename,
@@ -176,7 +198,8 @@ class CallbackModule(object):
             'only_tags': self.playbook.only_tags,
             'skip_tags': self.playbook.skip_tags,
             'check_mode': self.playbook.check,
-            'automation_on_behalf_of': self.playbook.extra_vars.get('automation_on_behalf_of', ''),
+            'automation_on_behalf_of': self.playbook.extra_vars.get(
+                'automation_on_behalf_of', ''),
             'remote_user': self.playbook.remote_user,
             'su': getattr(self.playbook, 'su', None),
             'su_user': getattr(self.playbook, 'su_user', None),
@@ -228,11 +251,10 @@ class CallbackModule(object):
         if len(hosts_in_play) == 0:
             return
 
-        hosts = self.play.playbook.inventory.get_hosts()
-
         # Combine inventory vars, global vars and extra vars
         self.my_vars = utils.combine_vars(self.my_vars, self.play.vars)
 
+        # This are not used until `playbook_on_stats`
         for myvar in self.audit_vars:
             val = get_dotted_val_in_dict(self.my_vars, myvar)
             self.audit_vars[myvar] = val
@@ -253,13 +275,16 @@ class CallbackModule(object):
             })
 
     def playbook_on_stats(self, stats):
-        stats_keys = ['processed', 'failures', 'ok', 'dark', 'changed', 'skipped']
-        summary_stats_keys = ['failures', 'ok', 'unreachable', 'changed', 'skipped']
+        stats_keys = ['processed', 'failures', 'ok', 'dark', 'changed',
+                      'skipped']
+        summary_stats_keys = ['failures', 'ok', 'unreachable', 'changed',
+                              'skipped']
         log_entry = {'stats': {'summary': {}, 'details': {}}}
 
         for key in stats_keys:
             log_entry['stats']['details'][key] = {}
             log_entry['stats']['details'][key] = getattr(stats, key)
+
         for key in summary_stats_keys:
             log_entry['stats']['summary'][key] = 0
 
