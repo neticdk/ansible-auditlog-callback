@@ -1,3 +1,9 @@
+# This callback plugin will:
+#   1) create a logfile (/var/log/ansible/<uuid>.log) for the entire run
+#   2) log audit information to that file in JSON-format
+#
+#   For available settings, see CallbackModule below
+
 import os
 import tempfile
 import errno
@@ -6,6 +12,7 @@ import socket
 import json
 import uuid
 import re
+import sys
 
 from subprocess import Popen, PIPE
 from ansible import utils
@@ -46,8 +53,11 @@ def truthy_string(s):
     return str(s).lower() in ['true', '1', 'y', 'yes']
 
 
-class AnsibleAuditlogLogger(object):
-    """Writes log entries to a file"""
+class JsonAuditLogger(object):
+    """Writes auditlog entries to a file in JSON format.
+
+    All log entries are marked with the same UUID and have timestamps.
+    """
 
     def __init__(self, logdir='/var/log/ansible'):
         self.uuid = str(uuid.uuid4())
@@ -85,7 +95,38 @@ class AnsibleAuditlogLogger(object):
 
 
 class CallbackModule(object):
-    """Logs information from ansible"""
+    """Logs audit information about ansible runs.
+
+    Throws a warning if logging fails.
+
+    Settings (environment variables):
+
+        ANSIBLE_AUDITLOG_DISABLED:
+            - enables or disables auditlog
+            - values: true|false
+            - default: false
+
+        ANSIBLE_AUDITLOG_FAILMODE:
+            - wether to fail or warn if logging doesn't work
+            - values: warn|fail
+            - default: warn
+
+        ANSIBLE_AUDITLOG_LOGNAME_ENABLED:
+            - enables or disables the use of 'logname' to find out who
+              originally ran ansible
+            - values: true|false
+            - default: true
+
+        ANSIBLE_AUDITLOG_LOGDIR:
+            - sets the directory used to store log files
+            - default: /var/log/ansible
+
+        ANSIBLE_AUDITLOG_AUDIT_VARS:
+            - sets a list of variables that should have their values logged
+            - format: comma-separated list of variable names. For dicts use dots
+              in the names to indicate the dict level.
+            - default: None
+    """
 
     def __init__(self):
         self.disabled = truthy_string(os.getenv('ANSIBLE_AUDITLOG_DISABLED', 0))
@@ -93,6 +134,7 @@ class CallbackModule(object):
             os.getenv('ANSIBLE_AUDITLOG_LOGNAME_ENABLED', 1))
         logdir = os.getenv('ANSIBLE_AUDITLOG_LOGDIR', '/var/log/ansible')
         audit_vars = os.getenv('ANSIBLE_AUDITLOG_AUDIT_VARS', None)
+        fail_mode = os.getenv('ANSIBLE_AUDITLOG_FAILMODE', 'warn')
 
         if self.disabled:
             utils.warning('Auditlog has been disabled!')
@@ -109,11 +151,14 @@ class CallbackModule(object):
             self.audit_vars = {}
 
         try:
-            self.logger = AnsibleAuditlogLogger(logdir=logdir)
+            self.logger = JsonAuditLogger(logdir=logdir)
         except Exception as e:
+            msg = 'Unable to initialize audit logging: {}'.format(str(e))
             self.disabled = True
-            utils.warning('Unable to initialize audit logging: '
-                          '{}'.format(str(e)))
+            utils.warning(msg)
+            if fail_mode == 'fail':
+                print(str(e))
+                sys.exit(1)
 
     def on_any(self, *args, **kwargs):
         pass
